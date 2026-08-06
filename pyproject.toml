@@ -1,0 +1,23 @@
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# E  = pycodestyle (style rules)
+# F  = pyflakes (bugs like unused imports)
+# I  = isort (import sorting)
+# UP = pyupgrade (modernize old syntax)
+# B  = bugbear (common bug patterns)
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+# ^ set this to true later once you're comfortable — it forces
+# every function to have type hints
