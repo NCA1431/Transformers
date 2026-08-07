@@ -1,5 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transformer-from-scratch"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = ["torch"]
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
 [tool.ruff]
-line-length = 88
+line-length = 100
+# The default line length is 88, but I set it to 100 to allow for longer,
+# explicit comments in my code.
 target-version = "py39"
 
 [tool.ruff.lint]
@@ -11,8 +30,9 @@ select = ["E", "F", "I", "UP", "B"]
 # B  = bugbear (common bug patterns)
 
 [tool.black]
-line-length = 88
+line-length = 100
 target-version = ["py39"]
+
 
 [tool.mypy]
 python_version = "3.9"
@@ -21,3 +41,5 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 # ^ set this to true later once you're comfortable — it forces
 # every function to have type hints
+explicit_package_bases = true
+mypy_path = "."
