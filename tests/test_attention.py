@@ -1,6 +1,6 @@
 import torch
 
-from src.attention import scaled_dot_product_attention
+from src.attention import MultiheadAttention, scaled_dot_product_attention
 
 
 def test_output_shape_and_weights_sum_to_one():
@@ -104,3 +104,86 @@ def test_causal_mask_blocks_future_positions():
     # These must be EXACTLY 0.0 (not just small): masked scores were set to -1e9,
     # and exp(-1e9) underflows to a literal 0.0 in softmax, not an approximation.
     assert torch.all(weights[0][future_positions] == 0.0)
+
+
+def test_mha_output_and_weights_shapes():
+    # WHY: multi-head must preserve d_model (128 in -> 128 out) so it slots into residuals
+    # later, and expose per-head weights of shape (batch, heads, seq_q, seq_k) for viz.
+    mha = MultiheadAttention(d_model=128, heads=4)
+    x = torch.randn(2, 10, 128)  # (batch, seq, d_model) — self-attention: query=key=value=x
+    output, weights = mha(x, x, x)
+    # self-attention here (q=k=v=x), so output matches x. (In general, output matches the
+    # QUERY's shape, not key/value's, that's what the cross-attention test checks separately.)
+    assert output.shape == x.shape  # but actually it has to match the decoder shape !
+    assert weights.shape == (2, 4, 10, 10)  # (batch, heads, seq_q, seq_k)
+
+
+def test_mha_cross_attention_different_seq_lengths():
+    # WHY: cross-attention has query from one sequence, key/value from ANOTHER, with
+    # DIFFERENT lengths (decoder len vs encoder len). This proves seq_q != seq_k works
+    # exactly the case that would break if the merge-back used seq_k instead of seq_q.
+    mha = MultiheadAttention(d_model=128, heads=4)
+    query = torch.randn(2, 5, 128)  # e.g. decoder: 5 positions
+    key_value = torch.randn(2, 8, 128)  # e.g. encoder: 8 positions
+    output, weights = mha(query, key_value, key_value)  # q from one, k/v from other
+    # output should have the QUERY's sequence length (one output per query position)
+    assert output.shape == (2, 5, 128)
+    # weights: (batch, heads, seq_q=5, seq_k=8), each query attends over all 8 keys
+    assert weights.shape == (2, 4, 5, 8)
+
+
+def test_mha_gradients_flow():
+    # WHY: proves the whole reshape -> attention -> merge -> W_O chain is differentiable
+    # end to end. If any reshape broke the graph, some param's grad would stay None.
+    mha = MultiheadAttention(d_model=128, heads=4)
+    x = torch.randn(2, 6, 128)
+    output, _ = mha(x, x, x)  # note: _ ignores weights (we only need output here)
+    loss = output.sum()
+    loss.backward()
+    assert all(p.grad is not None for p in mha.parameters())
+
+
+def test_mha_causal_mask_blocks_future():
+    # WHY THIS TEST: the decoder uses MASKED self-attention, a position must never attend to
+    # FUTURE positions (otherwise, at training time, the model could "cheat" by peeking at the
+    # answer it's supposed to predict). This test passes a causal mask and verifies that no
+    # attention weight lands on a future position, checked for EVERY head independently.
+
+    mha = MultiheadAttention(d_model=128, heads=4)
+    x = torch.randn(1, 5, 128)  # (batch=1, seq=5, d_model=128) —> self-attention: q=k=v=x
+
+    # This is self-attention, so query and key come from the SAME sequence x -> both have
+    # length 5. Keeping seq_q and seq_k as separate names (even though equal here) documents
+    # that the mask is a query x key grid: rows indexed by query position, cols by key position.
+    seq_q = 5  # number of query positions (rows of the mask)
+    seq_k = 5  # number of key positions (cols of the mask); equals seq_q for self-attention
+
+    # BUILD THE CAUSAL MASK, shape (1, 1, seq_q, seq_k) = (1, 1, 5, 5):
+    #   torch.ones(seq_q, seq_k, dtype=torch.bool) -> a 5x5 grid, all True.
+    #   torch.tril(...) keeps the LOWER triangle (on/below diagonal), sets the upper to False.
+    #     So mask[i,j]=True iff j<=i: query i may attend to key j only if j is at/before i.
+    #     True=KEEP is the convention scaled_dot_product_attention expects.
+    #   .view(1, 1, seq_q, seq_k) adds two leading size-1 axes. Inside attention, weights are
+    #     (batch, heads, seq_q, seq_k) = (1, 4, 5, 5). The mask's two leading 1s BROADCAST:
+    #     the size-1 batch axis stretches to 1, the size-1 heads axis stretches to 4, so this
+    #     ONE small 5x5 mask applies identically to all 4 heads and the whole batch, no need
+    #     to build a separate mask per head.
+    mask = torch.tril(torch.ones(seq_q, seq_k, dtype=torch.bool)).view(1, 1, seq_q, seq_k)
+
+    output, weights = mha(x, x, x, mask=mask)  # weights: (1, 4, 5, 5) = (batch, heads, q, k)
+
+    # BUILD THE "FUTURE" SELECTOR, the exact complement of the causal mask:
+    #   torch.triu(..., diagonal=1) keeps the STRICTLY-UPPER triangle (above the diagonal,
+    #   excluding it). So future[i,j]=True iff j>i: exactly the "later than i" positions that
+    #   the causal mask blocked. diagonal=1 is what excludes the diagonal itself (a position
+    #   is allowed to attend to ITSELF, so the diagonal must NOT be flagged as future).
+    future = torch.triu(torch.ones(seq_q, seq_k, dtype=torch.bool), diagonal=1)
+
+    # THE CHECK: every future-position weight, across ALL heads, must be EXACTLY 0.0.
+    #   weights[0, :, future] -> batch element 0, ":" = all 4 heads, and the boolean grid
+    #     `future` selects only the upper-triangle cells -> pulls those weights out, flattened.
+    #   == 0.0 exactly (not "close to"): masked scores were set to -1e9 before softmax, and
+    #     exp(-1e9) underflows to a LITERAL 0.0 in float math, so exact equality is correct.
+    #   torch.all(...) confirms EVERY one of those pulled-out weights is zero, no leakage,
+    #     in any head, to any future position.
+    assert torch.all(weights[0, :, future] == 0.0)

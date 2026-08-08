@@ -15,7 +15,7 @@ def test_output_shape():
     # match). This is the single most important check.
     ffn = PositionwiseFeedForward(d_model=128, d_ff=512)
     # ^ d_model/d_ff are IDENTITY args (they fix the weight shapes, set once). No data here.
-    x = torch.randn(32, 10, 128)  # (batch, seq, d_model) — a fake batch of random numbers
+    x = torch.randn(32, 10, 128)  # (batch, seq, d_model), a fake batch of random numbers
     out = ffn(x)  # ffn(x), NOT ffn.forward(x): ffn(x) runs __call__'s
     # setup (hooks, train/eval) and THEN my forward.
     assert out.shape == x.shape  # same shape in and out -> (32, 10, 128). d_ff=512 is
@@ -26,7 +26,7 @@ def test_parameters_are_registered():
     # WHY THIS TEST: this is the one that PROVES super().__init__() did its job. The two
     # nn.Linears were assigned to self.* AFTER super().__init__(), so nn.Module registered
     # them, so their weights show up in .parameters(). If I deleted super().__init__(),
-    # this test would go RED (params would be empty) — that's the "scary silent bug" made
+    # this test would go RED (params would be empty), that's the "scary silent bug" made
     # visible and catchable.
     ffn = PositionwiseFeedForward(d_model=128, d_ff=512)
     params = list(ffn.parameters())  # .parameters() comes free from inheriting nn.Module;
@@ -36,7 +36,7 @@ def test_parameters_are_registered():
 
 
 def test_gradients_flow():
-    # WHY THIS TEST: proves the whole learning chain end-to-end — forward records a graph,
+    # WHY THIS TEST: proves the whole learning chain end-to-end, forward records a graph,
     # backward walks it and fills each param's .grad. If any param's grad stayed None, that
     # weight isn't connected to the loss and would never learn (a real bug). These are
     # literally the first 3 lines of every training loop, stopped one step before step().
@@ -47,7 +47,7 @@ def test_gradients_flow():
     # weights are nn.Parameters with requires_grad=True.
     loss = out.sum()  # collapse the whole (4,5,128) tensor into ONE number by adding every
     # element. backward() can only start from a single scalar, so I need
-    # one. It's a FAKE loss — meaningless, just a valid scalar to backprop
+    # one. It's a FAKE loss, meaningless, just a valid scalar to backprop
     # from (real training puts a meaningful loss here). .mean() would work too.
     loss.backward()  # walk the recorded graph BACKWARDS from the scalar to every parameter,
     # using the chain rule, and fill each param's .grad. This IS backprop.
