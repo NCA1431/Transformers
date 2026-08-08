@@ -1,6 +1,19 @@
 import torch
 
-from src.data import EOS, PAD, START, build_example, make_batch, pad_to_length
+from src.data import (
+    EOS,
+    PAD,
+    START,
+    build_example,
+    generate_copy,
+    generate_digit_to_word,
+    generate_multiply,
+    generate_reverse,
+    generate_sort,
+    generate_sum,
+    make_batch,
+    pad_to_length,
+)
 
 
 def test_build_example_shift_alignment():
@@ -60,3 +73,68 @@ def test_make_batch_shapes_and_padding():
     assert src_b[1].tolist() == [9, EOS, PAD, PAD]  # [9, <eos>] padded to length 4
     # tensors must be integer type (token IDs), not float
     assert src_b.dtype == torch.int64
+
+
+def test_generate_copy():
+    # WHY: copy's target must equal its source exactly.
+    src, tgt = generate_copy()
+    assert tgt == src
+    # tokens are digit-tokens (ids 3-12 = digits 0-9)
+    assert all(3 <= t <= 12 for t in src)
+
+
+def test_generate_reverse():
+    # WHY: reverse's target must be the source reversed.
+    src, tgt = generate_reverse()
+    assert tgt == src[::-1]
+
+
+def test_generate_sort():
+    # WHY: sort's target must be the source sorted ascending.
+    src, tgt = generate_sort()
+    assert tgt == sorted(src)
+
+
+def test_generate_sum_values():
+    # WHY: the ±3 token/value conversion is bug-prone, so check the ARITHMETIC directly.
+    # We can't control the random input, so verify the relationship holds for whatever we get:
+    # the target digits, read back as a number, must equal the sum of the source digit-values.
+    src, tgt = generate_sum(count=3)
+    src_values = [t - 3 for t in src]  # tokens -> digit values
+    tgt_digits = [t - 3 for t in tgt]  # target tokens -> digit values
+    tgt_number = int("".join(str(d) for d in tgt_digits))  # digits -> the number they spell
+    assert tgt_number == sum(src_values)
+
+
+def test_generate_sum_multidigit():
+    # WHY: specifically check a sum that produces MULTIPLE digits (result >= 10), so the
+    # digit-splitting is exercised. We loop until we get such a case (random, but common).
+    for _ in range(100):
+        src, tgt = generate_sum(count=3)
+        if sum(t - 3 for t in src) >= 10:
+            assert len(tgt) >= 2  # a 2+ digit result -> 2+ target tokens
+            src_values = [t - 3 for t in src]  # tokens -> digit values
+            tgt_digits = [t - 3 for t in tgt]  # target tokens -> digit values
+            tgt_number = int("".join(str(d) for d in tgt_digits))  # digits -> the number they spell
+            assert tgt_number == sum(src_values)
+            return
+    # (if we never hit >=10 in 100 tries, something is off with the generator range)
+
+
+def test_generate_multiply_values():
+    # WHY: same arithmetic check for multiply.
+    src, tgt = generate_multiply(count=2)
+    src_values = [t - 3 for t in src]
+    tgt_digits = [t - 3 for t in tgt]
+    tgt_number = int("".join(str(d) for d in tgt_digits))
+    expected = src_values[0] * src_values[1]
+    assert tgt_number == expected
+
+
+def test_generate_digit_to_word():
+    # WHY: each digit-token (d+3) must map to its word-token (d+13), i.e. +10.
+    src, tgt = generate_digit_to_word()
+    assert all(t + 10 == w for t, w in zip(src, tgt, strict=False))  # every target = source + 10
+    # source tokens are digits (3-12), target tokens are words (13-22)
+    assert all(3 <= t <= 12 for t in src)
+    assert all(13 <= w <= 22 for w in tgt)
