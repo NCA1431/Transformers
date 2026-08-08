@@ -60,3 +60,46 @@ class EncoderLayer(nn.Module):
         x = self.norm2(x + ffn_out)  # Add & Norm again, second independent LayerNorm
 
         return x, weights
+
+
+class DecoderLayer(nn.Module):
+    # One decoder layer: THREE sub-layers, each wrapped in Add & Norm (Post-LN):
+    #   1. MASKED self-attention (causal, can't see future decoder positions)
+    #   2. CROSS-attention (query from decoder, key/value from ENCODER output)
+    #   3. FFN
+    # Order logic: look at what I've written so far (self) -> pull relevant info from the
+    # source via the encoder (cross) -> digest (FFN). Owns 2 attentions (self + cross),
+    # 1 FFN, 3 LayerNorms.
+
+    def __init__(self, d_model: int, heads: int, d_ff: int, dropout: float = 0.1) -> None:
+        super().__init__()
+        self.self_attention = MultiheadAttention(d_model, heads, dropout)
+        self.cross_attention = MultiheadAttention(d_model, heads, dropout)
+        self.ffn = PositionwiseFeedForward(d_model, d_ff, dropout)
+        self.norm1 = nn.LayerNorm(d_model)  # after masked self-attention
+        self.norm2 = nn.LayerNorm(d_model)  # after cross-attention
+        self.norm3 = nn.LayerNorm(d_model)  # after FFN
+
+    def forward(
+        self,
+        x: Tensor,  # the decoder's own input stream
+        encoder_output: Tensor,  # the encoder's output (for cross-attention K/V)
+        self_mask: Tensor | None = None,  # CAUSAL mask, for masked self-attention
+        cross_mask: Tensor | None = None,  # encoder PADDING mask, for cross-attention
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        # --- Sub-layer 1: MASKED self-attention (q=k=v=x, causal mask) ---
+        attn_out, self_weights = self.self_attention(x, x, x, self_mask)
+        x = self.norm1(x + attn_out)
+
+        # --- Sub-layer 2: CROSS-attention (q from decoder x, k/v from encoder_output) ---
+        # This is where decoder pulls information from the encoded source sequence.
+        cross_out, cross_weights = self.cross_attention(
+            x, encoder_output, encoder_output, cross_mask
+        )
+        x = self.norm2(x + cross_out)
+
+        # --- Sub-layer 3: FFN ---
+        ffn_out = self.ffn(x)
+        x = self.norm3(x + ffn_out)
+
+        return x, self_weights, cross_weights
