@@ -1,0 +1,59 @@
+_wandb:
+    value:
+        cli_version: 0.28.1
+        e:
+            30dlohh78oginbzbbfvxb94ow7x7fwz5:
+                codePath: train.py
+                codePathLocal: train.py
+                cpu_count: 4
+                cpu_count_logical: 8
+                disk:
+                    /:
+                        total: "510785929216"
+                        used: "461036646400"
+                email: nca1812@gmail.com
+                executable: C:\Users\Nca1812\Documents\Ecole CS\IA\Transformers\.venv\Scripts\python.exe
+                git:
+                    commit: b99c8570c69f2c5b57a638066abb6d998c5e67f9
+                    remote: https://github.com/NCA1431/Transformers.git
+                host: DESKTOP-4FH9S5O
+                memory:
+                    total: "8271470592"
+                os: Windows-10-10.0.26200-SP0
+                program: C:\Users\Nca1812\Documents\Ecole CS\IA\Transformers\train.py
+                python: CPython 3.10.6
+                root: C:\Users\Nca1812\Documents\Ecole CS\IA\Transformers
+                startedAt: "2026-08-10T21:01:38.016951Z"
+                writerId: 30dlohh78oginbzbbfvxb94ow7x7fwz5
+        m: []
+        python_version: 3.10.6
+        t:
+            "1":
+                - 1
+            "2":
+                - 1
+            "3":
+                - 2
+                - 13
+                - 16
+                - 61
+            "4": 3.10.6
+            "5": 0.28.1
+            "8":
+                - 3
+            "12": 0.28.1
+            "13": windows-amd64
+d_ff:
+    value: 512
+d_model:
+    value: 128
+heads:
+    value: 4
+lr:
+    value: 0.001
+n_examples:
+    value: 10
+num_layers:
+    value: 2
+steps:
+    value: 1500

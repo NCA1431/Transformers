@@ -1,0 +1,28 @@
+{
+  "os": "Windows-10-10.0.26200-SP0",
+  "python": "CPython 3.10.6",
+  "startedAt": "2026-08-10T13:01:26.363040Z",
+  "program": "C:\\Users\\Nca1812\\Documents\\Ecole CS\\IA\\Transformers\\train.py",
+  "codePath": "train.py",
+  "codePathLocal": "train.py",
+  "git": {
+    "remote": "https://github.com/NCA1431/Transformers.git",
+    "commit": "b99c8570c69f2c5b57a638066abb6d998c5e67f9"
+  },
+  "email": "nca1812@gmail.com",
+  "root": "C:\\Users\\Nca1812\\Documents\\Ecole CS\\IA\\Transformers",
+  "host": "DESKTOP-4FH9S5O",
+  "executable": "C:\\Users\\Nca1812\\Documents\\Ecole CS\\IA\\Transformers\\.venv\\Scripts\\python.exe",
+  "cpu_count": 4,
+  "cpu_count_logical": 8,
+  "disk": {
+    "/": {
+      "total": "510785929216",
+      "used": "459469893632"
+    }
+  },
+  "memory": {
+    "total": "8271470592"
+  },
+  "writerId": "9szim2bozrr4tmhntu020ecud7li7ncs"
+}
