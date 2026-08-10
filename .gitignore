@@ -221,3 +221,9 @@ __marimo__/
 # Word documents
 *.docx
 ~$*
+
+# Generated visualization outputs
+*.png
+
+# Weights & Biases local run cache
+wandb/
