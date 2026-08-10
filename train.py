@@ -263,8 +263,152 @@ def overfitting_test() -> None:
     print("(a model that only memorized 10 examples usually fails on unseen ones)")
 
 
+def greedy_decode_batch(model, src_batch, max_len=30):
+    # Batched greedy decode: generate outputs for a WHOLE BATCH of sources at once.
+    # src_batch: (batch, seq_src) token IDs. Returns a list of generated token-ID lists (one per
+    # source, each trimmed at its first <eos>). One forward pass per step handles ALL sequences.
+    from src.data import EOS, PAD, START
+
+    model.eval()
+    batch_size = src_batch.size(0)
+
+    # Every sequence's decoder input starts with <start>. Shape (batch, 1).
+    dec_in = torch.full((batch_size, 1), START, dtype=torch.long)
+    # "finished[i] = True" once sequence i has emitted <eos>;
+    # we then stop extending it meaningfully.
+    finished = torch.zeros(batch_size, dtype=torch.bool)
+
+    with torch.no_grad():
+        for _ in range(max_len):
+            # Masks for the current (growing) decoder length, plus source padding.
+            src_mask, tgt_mask, cross_mask = make_masks(src_batch, dec_in, pad_id=PAD)
+            logits, *_ = model(src_batch, dec_in, src_mask, tgt_mask, cross_mask)
+            # Next token for EVERY sequence = argmax at the last position. Shape (batch,).
+            next_tokens = logits[:, -1].argmax(dim=-1)  # (batch,)
+
+            # For sequences already finished, force the next token to PAD (don't generate real
+            # content past their <eos>). torch.where(cond, a, b): pick a where cond True, else b.
+            pad_col = torch.full((batch_size,), PAD, dtype=torch.long)
+            next_tokens = torch.where(finished, pad_col, next_tokens)
+
+            # Append this step's tokens as a new column.
+            # next_tokens.unsqueeze(1): (batch,)->(batch,1).
+            dec_in = torch.cat([dec_in, next_tokens.unsqueeze(1)], dim=1)
+
+            # Mark sequences that JUST produced <eos> as finished (OR into the flag).
+            finished = finished | (next_tokens == EOS)
+            # If every sequence is finished, no need to keep going.
+            if bool(finished.all()):
+                break
+
+    # Extract each sequence's tokens: drop the leading <start>, then cut at the first <eos>.
+    results = []
+    for i in range(batch_size):
+        tokens = dec_in[i, 1:].tolist()  # drop <start>
+        if EOS in tokens:
+            tokens = tokens[: tokens.index(EOS)]  # keep up to (not including) the first <eos>
+        results.append(tokens)
+    return results
+
+
+def evaluate_accuracy(model, generate_fn, n_eval=50, max_len=30):
+    # Measure how often the model produces the CORRECT output on FRESH (unseen) examples.
+    # generate_fn: a task generator like generate_copy, returning (src_core, tgt_core).
+    # Returns the fraction (0..1) of the n_eval examples decoded exactly correctly.
+    from src.data import build_example, make_batch
+
+    # Build n_eval fresh examples and batch their sources together for one batched decode.
+    pairs = [generate_fn() for _ in range(n_eval)]  # [(src_core, tgt_core), ...]
+    examples = [build_example(s, t) for s, t in pairs]  # -> (src, dec_in, dec_tgt) triples
+    src_batch, _, _ = make_batch(examples)  # (n_eval, seq_src)
+
+    generated = greedy_decode_batch(model, src_batch, max_len=max_len)  # list of token lists
+
+    # --- TEMPORARY DEBUG: show one example's generated vs. target ---
+    print("gen:", generated[0])  # what the model produced for the first eval example
+    print("tgt:", pairs[0][1])  # the correct target core (tgt_core) for that example
+    # ----------------------------------------------------------------
+
+    # Compare each generated sequence against the CORRECT target core (tgt_core).
+    correct = 0
+    for (_src_core, tgt_core), gen in zip(pairs, generated, strict=True):
+        if gen == tgt_core:  # exact match of the whole sequence
+            correct += 1
+    return correct / n_eval
+
+
+def train_copy(
+    lr: float = 1e-3,
+    steps: int = 3000,
+    batch_size: int = 64,  # examples per training step (fresh each step)
+    eval_every: int = 200,  # measure accuracy this often
+    n_eval: int = 50,  # how many unseen examples to evaluate on
+    d_model: int = 128,
+    num_layers: int = 2,
+    heads: int = 4,
+    d_ff: int = 512,
+    dropout: float = 0.1,
+) -> Transformer:
+    # REAL training on copy: unlike overfit_copy, a FRESH random batch is drawn EVERY step, so
+    # the model never sees the same example twice and must learn the GENERAL copy rule rather
+    # than memorizing. Accuracy is measured periodically on FRESH unseen examples, it should
+    # climb toward ~100%, proving genuine generalization (contrast the overfit model: 0% unseen).
+    wandb.init(
+        project="transformer-from-scratch",
+        name="train-copy",
+        config={
+            "lr": lr,
+            "steps": steps,
+            "batch_size": batch_size,
+            "d_model": d_model,
+            "num_layers": num_layers,
+            "heads": heads,
+            "d_ff": d_ff,
+            "dropout": dropout,
+        },
+    )
+    torch.manual_seed(0)
+    random.seed(0)
+    vocab = 13
+
+    model = Transformer(
+        vocab=vocab, d_model=d_model, num_layers=num_layers, heads=heads, d_ff=d_ff, dropout=dropout
+    )
+    criterion = nn.CrossEntropyLoss(ignore_index=PAD)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    for step in range(steps):
+        model.train()
+        # THE KEY CHANGE vs overfit: build a FRESH random batch every step (not reused).
+        examples = [build_example(*generate_copy()) for _ in range(batch_size)]
+        src, dec_in, dec_tgt = make_batch(examples)
+
+        src_mask, tgt_mask, cross_mask = make_masks(src, dec_in, pad_id=PAD)
+        logits, *_ = model(src, dec_in, src_mask, tgt_mask, cross_mask)
+        loss = criterion(logits.reshape(-1, vocab), dec_tgt.reshape(-1))
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        log = {"loss": loss.item()}
+        # Periodically measure accuracy on FRESH unseen examples (generalization).
+        if step % eval_every == 0:
+            acc = evaluate_accuracy(model, generate_copy, n_eval=n_eval)
+            log["accuracy"] = acc
+            print(f"step {step:4d}   loss {loss.item():.4f}   accuracy {acc:.2%}")
+        wandb.log(log, step=step)
+
+    # Final accuracy check.
+    final_acc = evaluate_accuracy(model, generate_copy, n_eval=n_eval)
+    print(f"\nfinal accuracy on unseen examples: {final_acc:.2%}")
+    wandb.log({"accuracy": final_acc}, step=steps)
+    wandb.finish()
+    return model
+
+
 if __name__ == "__main__":
     # __main__ is the thin ENTRY POINT: it runs only when this file is executed directly
     # (`python train.py`), not when imported. All the real logic lives in named functions above
     # (reusable, importable); __main__ just kicks the whole thing off.
-    overfitting_test()
+    train_copy(steps=8000, batch_size=32, eval_every=200, n_eval=10, lr=1e-3)

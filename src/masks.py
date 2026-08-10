@@ -61,7 +61,12 @@ def make_masks(src: Tensor, tgt: Tensor, pad_id: int = 0) -> tuple[Tensor, Tenso
     returns: (src_mask, tgt_mask, cross_mask)
       src_mask:   (batch, 1, 1, seq_src)          -> encoder self-attention (source padding)
       tgt_mask:   (batch, 1, seq_tgt, seq_tgt)    -> decoder self-attention (causal + tgt padding)
+            the DECODER'S INPUT sequence —> at training this is the shifted target
+            (teacher forcing), at inference it's the tokens generated so far.
+            Named `tgt` for brevity, but it means "whatever currently feeds the decoder,"
+            not specifically the true target.
       cross_mask: (batch, 1, 1, seq_src)          -> cross-attention (source padding; = src_mask)
+
 
         # HOW EACH MASK BROADCASTS against the 4-D attention scores (batch, heads, seq_q, seq_k).
         # Masks carry size-1 dims that stretch to fill heads / query axes automatically:

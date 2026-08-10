@@ -89,7 +89,7 @@ def make_batch(
 
 
 def _random_sequence(
-    min_len: int = 5, max_len: int = 20, low: int = 3, high: int = 12
+    min_len: int = 5, max_len: int = 10, low: int = 3, high: int = 12
 ) -> list[int]:
     # A random sequence of digit-token IDs. low=3, high=12 maps to digits 0-9 (since IDs 3-12
     # are the digits, with 0/1/2 reserved for <pad>/<start>/<eos>). Length varies in [min,max].
