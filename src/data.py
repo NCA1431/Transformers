@@ -89,7 +89,7 @@ def make_batch(
 
 
 def _random_sequence(
-    min_len: int = 5, max_len: int = 10, low: int = 3, high: int = 12
+    min_len: int = 5, max_len: int = 20, low: int = 3, high: int = 12
 ) -> list[int]:
     # A random sequence of digit-token IDs. low=3, high=12 maps to digits 0-9 (since IDs 3-12
     # are the digits, with 0/1/2 reserved for <pad>/<start>/<eos>). Length varies in [min,max].
@@ -97,21 +97,30 @@ def _random_sequence(
     return [random.randint(low, high) for _ in range(length)]
 
 
-def generate_copy() -> tuple[list[int], list[int]]:
+def generate_copy(
+    min_len: int = 5,
+    max_len: int = 20,
+) -> tuple[list[int], list[int]]:
     # COPY: target is the source, unchanged.
-    seq = _random_sequence()
+    seq = _random_sequence(min_len=min_len, max_len=max_len)
     return seq, seq  # (src_core, tgt_core)
 
 
-def generate_reverse() -> tuple[list[int], list[int]]:
+def generate_reverse(
+    min_len: int = 5,
+    max_len: int = 20,
+) -> tuple[list[int], list[int]]:
     # REVERSE: target is the source reversed. [::-1] is Python's reverse-slice.
-    seq = _random_sequence()
+    seq = _random_sequence(min_len=min_len, max_len=max_len)
     return seq, seq[::-1]
 
 
-def generate_sort() -> tuple[list[int], list[int]]:
+def generate_sort(
+    min_len: int = 5,
+    max_len: int = 20,
+) -> tuple[list[int], list[int]]:
     # SORT: target is the source sorted ascending.
-    seq = _random_sequence()
+    seq = _random_sequence(min_len=min_len, max_len=max_len)
     return seq, sorted(seq)
 
 
@@ -122,28 +131,37 @@ def _digits_of(n: int) -> list[int]:
     return [int(c) + 3 for c in str(n)]
 
 
-def generate_sum(count: int = 3) -> tuple[list[int], list[int]]:
+def generate_sum(
+    min_len: int = 3,
+    max_len: int = 3,
+) -> tuple[list[int], list[int]]:
     # SUM: source is `count` random digits; target is the DIGITS of their sum.
     # e.g. digits [3,5,2] (as tokens) -> sum 10 -> target digit-tokens for "1","0".
-    seq = _random_sequence(min_len=count, max_len=count)  # fixed length = count
+    seq = _random_sequence(min_len=min_len, max_len=max_len)  # fixed length = count
     total = sum(tok - 3 for tok in seq)  # convert tokens back to values, sum
     return seq, _digits_of(total)  # target: digits of the sum
 
 
-def generate_multiply(count: int = 2) -> tuple[list[int], list[int]]:
+def generate_multiply(
+    min_len: int = 2,
+    max_len: int = 2,
+) -> tuple[list[int], list[int]]:
     # MULTIPLY: source is `count` random digits; target is the DIGITS of their product.
     # count=2 keeps products small (max 9*9=81, two digits). More multiplicands explode fast.
-    seq = _random_sequence(min_len=count, max_len=count)  # fixed length = count
+    seq = _random_sequence(min_len=min_len, max_len=max_len)  # fixed length = count
     product = 1
     for tok in seq:
         product *= tok - 3  # token back to value, multiply
     return seq, _digits_of(product)
 
 
-def generate_digit_to_word() -> tuple[list[int], list[int]]:
+def generate_digit_to_word(
+    min_len: int = 3,
+    max_len: int = 3,
+) -> tuple[list[int], list[int]]:
     # DIGIT -> WORD: source is digit-tokens, target is the matching WORD-tokens.
     # digit value d -> digit token d+3 (source), word token d+13 (target).
     # So for each source digit-token, the target word-token is (source_token - 3) + 13 = token + 10.
-    seq = _random_sequence()  # digit-tokens (ids 3-12)
+    seq = _random_sequence(min_len=min_len, max_len=max_len)  # digit-tokens (ids 3-12)
     words = [tok + 10 for tok in seq]  # digit-token d+3 -> word-token d+13 (shift by +10)
     return seq, words

@@ -227,3 +227,6 @@ __marimo__/
 
 # Weights & Biases local run cache
 wandb/
+
+# Saved model weights + optimizer state
+*.pt

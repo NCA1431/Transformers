@@ -99,7 +99,7 @@ def test_generate_sum_values():
     # WHY: the ±3 token/value conversion is bug-prone, so check the ARITHMETIC directly.
     # We can't control the random input, so verify the relationship holds for whatever we get:
     # the target digits, read back as a number, must equal the sum of the source digit-values.
-    src, tgt = generate_sum(count=3)
+    src, tgt = generate_sum(min_len=3, max_len=3)
     src_values = [t - 3 for t in src]  # tokens -> digit values
     tgt_digits = [t - 3 for t in tgt]  # target tokens -> digit values
     tgt_number = int("".join(str(d) for d in tgt_digits))  # digits -> the number they spell
@@ -110,7 +110,7 @@ def test_generate_sum_multidigit():
     # WHY: specifically check a sum that produces MULTIPLE digits (result >= 10), so the
     # digit-splitting is exercised. We loop until we get such a case (random, but common).
     for _ in range(100):
-        src, tgt = generate_sum(count=3)
+        src, tgt = generate_sum(min_len=3, max_len=3)
         if sum(t - 3 for t in src) >= 10:
             assert len(tgt) >= 2  # a 2+ digit result -> 2+ target tokens
             src_values = [t - 3 for t in src]  # tokens -> digit values
@@ -123,7 +123,7 @@ def test_generate_sum_multidigit():
 
 def test_generate_multiply_values():
     # WHY: same arithmetic check for multiply.
-    src, tgt = generate_multiply(count=2)
+    src, tgt = generate_multiply(min_len=2, max_len=2)
     src_values = [t - 3 for t in src]
     tgt_digits = [t - 3 for t in tgt]
     tgt_number = int("".join(str(d) for d in tgt_digits))

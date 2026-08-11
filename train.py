@@ -1,4 +1,6 @@
+import os
 import random
+from datetime import datetime
 
 import matplotlib.pyplot as plt
 import torch
@@ -311,14 +313,15 @@ def greedy_decode_batch(model, src_batch, max_len=30):
     return results
 
 
-def evaluate_accuracy(model, generate_fn, n_eval=50, max_len=30):
+def evaluate_accuracy(model, generate_fn, n_eval=50, max_len=30, min_len_gen=5, max_len_gen=20):
     # Measure how often the model produces the CORRECT output on FRESH (unseen) examples.
     # generate_fn: a task generator like generate_copy, returning (src_core, tgt_core).
     # Returns the fraction (0..1) of the n_eval examples decoded exactly correctly.
     from src.data import build_example, make_batch
 
     # Build n_eval fresh examples and batch their sources together for one batched decode.
-    pairs = [generate_fn() for _ in range(n_eval)]  # [(src_core, tgt_core), ...]
+    pairs = [generate_fn(min_len=min_len_gen, max_len=max_len_gen) for _ in range(n_eval)]
+    # [(src_core, tgt_core), ...]
     examples = [build_example(s, t) for s, t in pairs]  # -> (src, dec_in, dec_tgt) triples
     src_batch, _, _ = make_batch(examples)  # (n_eval, seq_src)
 
@@ -337,54 +340,80 @@ def evaluate_accuracy(model, generate_fn, n_eval=50, max_len=30):
     return correct / n_eval
 
 
-def train_copy(
+def train_task(
+    generate_fn,  # a task generator, e.g. generate_copy, generate_reverse
+    task_name: str,  # short label for the WandB run + saved filename, e.g. "copy"
+    vocab: int = 13,  # 13 for most tasks; 23 for digit-to-word (adds the word tokens)
     lr: float = 1e-3,
-    steps: int = 3000,
-    batch_size: int = 64,  # examples per training step (fresh each step)
+    steps: int = 8000,
+    batch_size: int = 32,  # examples per training step (fresh each step)
     eval_every: int = 200,  # measure accuracy this often
-    n_eval: int = 50,  # how many unseen examples to evaluate on
+    n_eval: int = 20,  # how many unseen examples to evaluate on
     d_model: int = 128,
     num_layers: int = 2,
     heads: int = 4,
     d_ff: int = 512,
     dropout: float = 0.1,
+    resume_from: str | None = None,  # path to a .pt checkpoint to CONTINUE training from
+    min_len: int = 5,
+    max_len: int = 20,
 ) -> Transformer:
-    # REAL training on copy: unlike overfit_copy, a FRESH random batch is drawn EVERY step, so
-    # the model never sees the same example twice and must learn the GENERAL copy rule rather
-    # than memorizing. Accuracy is measured periodically on FRESH unseen examples, it should
-    # climb toward ~100%, proving genuine generalization (contrast the overfit model: 0% unseen).
+    # GENERAL real training for ANY toy task. Unlike overfit_copy, a FRESH random batch is drawn
+    # EVERY step, so the model never sees the same example twice and must learn the GENERAL rule
+    # rather than memorizing. Accuracy is measured periodically on FRESH unseen examples, it
+    # should climb toward ~100%, proving genuine generalization (contrast the overfit model: 0%
+    # on unseen). Pass a different generate_fn per task; pass vocab=23 for digit-to-word; pass
+    # resume_from to load an existing checkpoint and keep training it instead of starting fresh.
     wandb.init(
         project="transformer-from-scratch",
-        name="train-copy",
+        name=f"train-{task_name}",  # e.g. "train-copy", "train-reverse", one WandB run per task
         config={
+            "task": task_name,
             "lr": lr,
             "steps": steps,
             "batch_size": batch_size,
+            "vocab": vocab,
             "d_model": d_model,
             "num_layers": num_layers,
             "heads": heads,
             "d_ff": d_ff,
             "dropout": dropout,
+            "min_len_input_training": min_len,
+            "max_len_input_training": max_len,
         },
     )
     torch.manual_seed(0)
     random.seed(0)
-    vocab = 13
 
     model = Transformer(
         vocab=vocab, d_model=d_model, num_layers=num_layers, heads=heads, d_ff=d_ff, dropout=dropout
     )
     criterion = nn.CrossEntropyLoss(ignore_index=PAD)
+    # Adam created BEFORE the resume block, because loading optimizer state needs the optimizer
+    # to already exist (we load INTO it).
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    # RESUME: if a checkpoint path was given, load BOTH the model weights AND the optimizer state,
+    # so training continues seamlessly (Adam keeps its per-parameter momentum/scaling averages
+    # rather than re-warming from scratch). The checkpoint is a dict holding both pieces.
+    if resume_from is not None:
+        checkpoint = torch.load(resume_from)
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        print(f"resumed from {resume_from}")
 
     for step in range(steps):
         model.train()
-        # THE KEY CHANGE vs overfit: build a FRESH random batch every step (not reused).
-        examples = [build_example(*generate_copy()) for _ in range(batch_size)]
+        # THE KEY IDEA vs overfit: build a FRESH random batch every step (not reused), from THIS
+        # task's generator. build_example(*generate_fn()) unpacks the (src_core, tgt_core) tuple.
+        examples = [
+            build_example(*generate_fn(min_len=min_len, max_len=max_len)) for _ in range(batch_size)
+        ]
         src, dec_in, dec_tgt = make_batch(examples)
 
         src_mask, tgt_mask, cross_mask = make_masks(src, dec_in, pad_id=PAD)
         logits, *_ = model(src, dec_in, src_mask, tgt_mask, cross_mask)
+        # Flatten every position into one list, compare logits against the decoder TARGET.
         loss = criterion(logits.reshape(-1, vocab), dec_tgt.reshape(-1))
 
         optimizer.zero_grad()
@@ -392,23 +421,84 @@ def train_copy(
         optimizer.step()
 
         log = {"loss": loss.item()}
-        # Periodically measure accuracy on FRESH unseen examples (generalization).
+        # Periodically measure exact-match accuracy on FRESH unseen examples (generalization).
         if step % eval_every == 0:
-            acc = evaluate_accuracy(model, generate_copy, n_eval=n_eval)
+            acc = evaluate_accuracy(
+                model, generate_fn, n_eval=n_eval, min_len_gen=min_len, max_len_gen=max_len
+            )
             log["accuracy"] = acc
             print(f"step {step:4d}   loss {loss.item():.4f}   accuracy {acc:.2%}")
         wandb.log(log, step=step)
 
-    # Final accuracy check.
-    final_acc = evaluate_accuracy(model, generate_copy, n_eval=n_eval)
+    # Final accuracy check on unseen examples.
+    final_acc = evaluate_accuracy(
+        model, generate_fn, n_eval=n_eval, min_len_gen=min_len, max_len_gen=max_len
+    )
     print(f"\nfinal accuracy on unseen examples: {final_acc:.2%}")
     wandb.log({"accuracy": final_acc}, step=steps)
     wandb.finish()
+
+    # SAVE a TIMESTAMPED checkpoint so this model is preserved and never overwritten by later
+    # runs. The checkpoint is a dict with both the model weights and the optimizer state
+    # (the standard PyTorch format), which is what makes a later resume seamless.
+    os.makedirs("checkpoints", exist_ok=True)  # create the folder if it doesn't exist yet
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # e.g. "20260811_014230"
+    path = f"checkpoints/{task_name}_{timestamp}.pt"  # e.g. "checkpoints/copy_20260811_014230.pt"
+    torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict()}, path)
+    print(f"saved model to {path}")
     return model
 
 
+def interactive_decode(model_path: str, vocab: int = 13, max_len: int = 30) -> None:
+    # Load a SAVED model and decode USER-supplied sequences interactively, works for ANY task,
+    # because the output is translated back to readable form via ID_TO_STR (not a hardcoded
+    # digit mapping). The user types space-separated digits (the SOURCE is always digits); the
+    # OUTPUT is shown as whatever tokens the model produces (digits, words, etc.).
+    from src.data import ID_TO_STR, build_example, make_batch
+
+    model = Transformer(vocab=vocab, d_model=128, num_layers=2, heads=4, d_ff=512)
+    checkpoint = torch.load(model_path)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    print(f"loaded {model_path}. Type space-separated digits (0-9), or 'quit'.")
+
+    while True:
+        text = input("> ").strip()
+        if text == "quit":
+            break
+        try:
+            digits = [int(x) for x in text.split()]  # user digits, e.g. "5 3 7" -> [5, 3, 7]
+            src_core = [d + 3 for d in digits]  # digits -> token IDs (digit d -> token d+3)
+        except ValueError:
+            print("please enter digits separated by spaces")
+            continue
+        src, _, _ = make_batch([build_example(src_core, src_core)])
+        gen = greedy_decode_batch(model, src, max_len=max_len)[0]
+        # Translate each output token to its readable string via ID_TO_STR. This works for ANY
+        # task: digits show as "0".."9", words as "zero".."nine", etc. We skip the special tokens
+        # (<pad>, <start>, <eos>) so only real output content is shown.
+        specials = {"<pad>", "<start>", "<eos>"}
+        readable = [ID_TO_STR[t] for t in gen if ID_TO_STR.get(t) not in specials]
+        print(f"  model output: {' '.join(readable)}")
+
+
 if __name__ == "__main__":
+    from src.data import generate_copy
+
     # __main__ is the thin ENTRY POINT: it runs only when this file is executed directly
     # (`python train.py`), not when imported. All the real logic lives in named functions above
     # (reusable, importable); __main__ just kicks the whole thing off.
-    train_copy(steps=8000, batch_size=32, eval_every=200, n_eval=10, lr=1e-3)
+    train_task(
+        generate_fn=generate_copy,
+        task_name="copyWithSavedWeights",
+        steps=8000,
+        batch_size=32,
+        eval_every=200,
+        n_eval=10,
+        min_len=5,
+        max_len=10,
+    )
+    # Later, to use it interactively:
+    #   interactive_decode("checkpoints/copy_20260811_014230.pt")
+    # Or to continue training an existing model:
+    #   train_task(generate_copy, "copy", steps=4000, resume_from="checkpoints/copy_....pt")
