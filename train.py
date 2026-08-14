@@ -1,5 +1,6 @@
 import os
 import random
+import time
 from datetime import datetime
 
 import matplotlib.pyplot as plt
@@ -357,6 +358,8 @@ def train_task(
     resume_from: str | None = None,  # path to a .pt checkpoint to CONTINUE training from
     min_len: int = 5,
     max_len: int = 20,
+    label_smoothing: float = 0.0,  # 0.0 = off (hard targets); 0.1 = soften targets (paper value)
+    warmup_steps: int = 0,  # 0 = constant LR (minimal loop); >0 = enable LR warmup
 ) -> Transformer:
     # GENERAL real training for ANY toy task. Unlike overfit_copy, a FRESH random batch is drawn
     # EVERY step, so the model never sees the same example twice and must learn the GENERAL rule
@@ -380,6 +383,8 @@ def train_task(
             "dropout": dropout,
             "min_len_input_training": min_len,
             "max_len_input_training": max_len,
+            "label_smoothing": label_smoothing,
+            "warmup_steps": warmup_steps,
         },
     )
     torch.manual_seed(0)
@@ -388,54 +393,96 @@ def train_task(
     model = Transformer(
         vocab=vocab, d_model=d_model, num_layers=num_layers, heads=heads, d_ff=d_ff, dropout=dropout
     )
-    criterion = nn.CrossEntropyLoss(ignore_index=PAD)
+    criterion = nn.CrossEntropyLoss(ignore_index=PAD, label_smoothing=label_smoothing)
     # Adam created BEFORE the resume block, because loading optimizer state needs the optimizer
     # to already exist (we load INTO it).
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
+    # LR WARMUP: if warmup_steps > 0, ramp the learning rate up linearly over the first
+    # warmup_steps, then decay it as 1/sqrt(step).
+    # If warmup_steps == 0, no scheduler -> constant LR.
+    scheduler = None
+    if warmup_steps > 0:
+
+        def lr_lambda(current_step: int) -> float:
+            step = max(1, current_step)  # avoid division by zero at step 0
+            return min(step / warmup_steps, (warmup_steps / step) ** 0.5)
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
     # RESUME: if a checkpoint path was given, load BOTH the model weights AND the optimizer state,
     # so training continues seamlessly (Adam keeps its per-parameter momentum/scaling averages
     # rather than re-warming from scratch). The checkpoint is a dict holding both pieces.
+    previous_total_time = 0.0  # accumulated training time from previous runs (0 if starting fresh)
     if resume_from is not None:
         checkpoint = torch.load(resume_from)
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
-        print(f"resumed from {resume_from}")
+        previous_total_time = checkpoint.get("total_train_time", 0.0)  # accumulated so far
+        print(f"resumed from {resume_from} (previous total time: {previous_total_time:.1f}s)")
 
-    for step in range(steps):
-        model.train()
-        # THE KEY IDEA vs overfit: build a FRESH random batch every step (not reused), from THIS
-        # task's generator. build_example(*generate_fn()) unpacks the (src_core, tgt_core) tuple.
-        examples = [
-            build_example(*generate_fn(min_len=min_len, max_len=max_len)) for _ in range(batch_size)
-        ]
-        src, dec_in, dec_tgt = make_batch(examples)
+    train_start = time.time()  # start the training-time clock
 
-        src_mask, tgt_mask, cross_mask = make_masks(src, dec_in, pad_id=PAD)
-        logits, *_ = model(src, dec_in, src_mask, tgt_mask, cross_mask)
-        # Flatten every position into one list, compare logits against the decoder TARGET.
-        loss = criterion(logits.reshape(-1, vocab), dec_tgt.reshape(-1))
+    try:
+        for step in range(steps):
+            model.train()
+            # THE KEY IDEA vs overfit: build a FRESH random batch every step (not reused), from THIS
+            # task's generator. build_example(*generate_fn()) unpacks the (src_core, tgt_core) tuple
+            examples = [
+                build_example(*generate_fn(min_len=min_len, max_len=max_len))
+                for _ in range(batch_size)
+            ]
+            src, dec_in, dec_tgt = make_batch(examples)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            src_mask, tgt_mask, cross_mask = make_masks(src, dec_in, pad_id=PAD)
+            logits, *_ = model(src, dec_in, src_mask, tgt_mask, cross_mask)
+            # Flatten every position into one list, compare logits against the decoder TARGET.
+            loss = criterion(logits.reshape(-1, vocab), dec_tgt.reshape(-1))
 
-        log = {"loss": loss.item()}
-        # Periodically measure exact-match accuracy on FRESH unseen examples (generalization).
-        if step % eval_every == 0:
-            acc = evaluate_accuracy(
-                model, generate_fn, n_eval=n_eval, min_len_gen=min_len, max_len_gen=max_len
-            )
-            log["accuracy"] = acc
-            print(f"step {step:4d}   loss {loss.item():.4f}   accuracy {acc:.2%}")
-        wandb.log(log, step=step)
+            optimizer.zero_grad()  # clear old gradients
+            loss.backward()  # compute new gradients
+            optimizer.step()  # UPDATE weights using current LR
+            if scheduler is not None:  # advance the LR schedule (only when warmup is enabled)
+                scheduler.step()  # ADVANCE the LR for the NEXT step
+
+            log = {"loss": loss.item()}
+            # Periodically measure exact-match accuracy on FRESH unseen examples (generalization).
+            if step % eval_every == 0:
+                acc = evaluate_accuracy(
+                    model, generate_fn, n_eval=n_eval, min_len_gen=min_len, max_len_gen=max_len
+                )
+                log["accuracy"] = acc
+                print(f"step {step:4d}   loss {loss.item():.4f}   accuracy {acc:.2%}")
+            wandb.log(log, step=step)
+    except KeyboardInterrupt:
+        # Ctrl+C: stop training early but continue to the save/finish code below, so the model
+        # is still checkpointed and WandB is closed cleanly (nothing is lost).
+        print(f"\ninterrupted at step {step} — saving and finishing cleanly...")
+
+    # after training, compute THIS run's time:
+    this_run_time = time.time() - train_start
+
+    total_train_time = previous_total_time + this_run_time
+    # 0 + this_run if fresh; prev + this if resumed
 
     # Final accuracy check on unseen examples.
     final_acc = evaluate_accuracy(
         model, generate_fn, n_eval=n_eval, min_len_gen=min_len, max_len_gen=max_len
     )
-    print(f"\nfinal accuracy on unseen examples: {final_acc:.2%}")
-    wandb.log({"accuracy": final_acc}, step=steps)
+
+    print(
+        f"\nfinal accuracy on unseen examples: {final_acc:.2%} "
+        f"this run: {this_run_time:.1f}s  total across all runs: {total_train_time:.1f}s"
+    )
+
+    wandb.log(
+        {
+            "accuracy": final_acc,
+            "this_run_time_seconds": this_run_time,
+            "total_train_time_seconds": total_train_time,
+        },
+        step=steps,
+    )
     wandb.finish()
 
     # SAVE a TIMESTAMPED checkpoint so this model is preserved and never overwritten by later
@@ -444,7 +491,15 @@ def train_task(
     os.makedirs("checkpoints", exist_ok=True)  # create the folder if it doesn't exist yet
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # e.g. "20260811_014230"
     path = f"checkpoints/{task_name}_{timestamp}.pt"  # e.g. "checkpoints/copy_20260811_014230.pt"
-    torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict()}, path)
+    # save the ACCUMULATED time in the checkpoint, so the next resume can continue adding
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "total_train_time": total_train_time,
+        },
+        path,
+    )
     print(f"saved model to {path}")
     return model
 
@@ -473,32 +528,126 @@ def interactive_decode(model_path: str, vocab: int = 13, max_len: int = 30) -> N
             print("please enter digits separated by spaces")
             continue
         src, _, _ = make_batch([build_example(src_core, src_core)])
+
+        # Time the inference: how long the model takes to generate the output for THIS input.
+        infer_start = time.time()
         gen = greedy_decode_batch(model, src, max_len=max_len)[0]
+        infer_time = time.time() - infer_start
+
         # Translate each output token to its readable string via ID_TO_STR. This works for ANY
         # task: digits show as "0".."9", words as "zero".."nine", etc. We skip the special tokens
         # (<pad>, <start>, <eos>) so only real output content is shown.
         specials = {"<pad>", "<start>", "<eos>"}
         readable = [ID_TO_STR[t] for t in gen if ID_TO_STR.get(t) not in specials]
-        print(f"  model output: {' '.join(readable)}")
+
+        # Show the output AND how long it took to produce (in milliseconds —> inference is fast).
+        print(f"  model output: {' '.join(readable)}   ({infer_time * 1000:.1f} ms)")
 
 
 if __name__ == "__main__":
-    from src.data import generate_copy
+    from src.data import (
+        generate_copy,
+        generate_multiply,
+        generate_sort,
+        generate_sum,
+    )
 
     # __main__ is the thin ENTRY POINT: it runs only when this file is executed directly
     # (`python train.py`), not when imported. All the real logic lives in named functions above
     # (reusable, importable); __main__ just kicks the whole thing off.
+
+    # ===== RUNS 1-3: IMPROVED LOOP (label smoothing + warmup), baseline model size =====
     train_task(
-        generate_fn=generate_copy,
-        task_name="copyWithSavedWeights",
-        steps=8000,
+        generate_fn=generate_sort,
+        task_name="Sort_improved_loop",
+        steps=25000,
+        batch_size=32,
+        eval_every=200,
+        n_eval=20,
+        min_len=5,
+        max_len=20,
+        label_smoothing=0.1,
+        warmup_steps=400,
+    )
+    train_task(
+        generate_fn=generate_sum,
+        task_name="Sum_improved_loop",
+        steps=25000,
         batch_size=32,
         eval_every=200,
         n_eval=10,
         min_len=5,
-        max_len=10,
+        max_len=20,
+        label_smoothing=0.1,
+        warmup_steps=400,
     )
+    train_task(
+        generate_fn=generate_multiply,
+        task_name="Multiply_improved_loop",
+        steps=25000,
+        batch_size=32,
+        eval_every=200,
+        n_eval=10,
+        min_len=5,
+        max_len=20,
+        label_smoothing=0.1,
+        warmup_steps=400,
+    )
+
+    # ===== RUNS 4-6: BIGGER MODEL, baseline loop (isolates the capacity effect) =====
+    train_task(
+        generate_fn=generate_sort,
+        task_name="Sort_bigger_model",
+        steps=25000,
+        batch_size=32,
+        eval_every=200,
+        n_eval=20,
+        min_len=5,
+        max_len=20,
+        d_model=256,
+        num_layers=4,
+        heads=8,
+        d_ff=1024,
+    )
+    train_task(
+        generate_fn=generate_sum,
+        task_name="Sum_bigger_model",
+        steps=25000,
+        batch_size=32,
+        eval_every=200,
+        n_eval=10,
+        min_len=5,
+        max_len=20,
+        d_model=256,
+        num_layers=4,
+        heads=8,
+        d_ff=1024,
+    )
+    train_task(
+        generate_fn=generate_multiply,
+        task_name="Multiply_bigger_model",
+        steps=25000,
+        batch_size=32,
+        eval_every=200,
+        n_eval=10,
+        min_len=5,
+        max_len=20,
+        d_model=256,
+        num_layers=4,
+        heads=8,
+        d_ff=1024,
+    )
+
     # Later, to use it interactively:
     #   interactive_decode("checkpoints/copy_20260811_014230.pt")
     # Or to continue training an existing model:
-    #   train_task(generate_copy, "copy", steps=4000, resume_from="checkpoints/copy_....pt")
+    # train_task(
+    # generate_fn=generate_copy,
+    # task_name="copyWithSavedWeights",
+    # steps=4000,
+    # resume_from="checkpoints/copyWithSavedWeights_20260812_181606.pt",
+    # batch_size=32,
+    # eval_every=200,
+    # n_eval=10,
+    # min_len=5,
+    # max_len=10,)

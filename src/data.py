@@ -146,9 +146,9 @@ def generate_multiply(
     min_len: int = 2,
     max_len: int = 2,
 ) -> tuple[list[int], list[int]]:
-    # MULTIPLY: source is `count` random digits; target is the DIGITS of their product.
-    # count=2 keeps products small (max 9*9=81, two digits). More multiplicands explode fast.
-    seq = _random_sequence(min_len=min_len, max_len=max_len)  # fixed length = count
+    # MULTIPLY: source is min_len..max_len random digits (1-9, no zero); target is the DIGITS
+    # of their product. Small operand counts keep products manageable; many operands explode fast.
+    seq = _random_sequence(min_len=min_len, max_len=max_len, low=4)  # low=4 -> digits 1-9, no zero
     product = 1
     for tok in seq:
         product *= tok - 3  # token back to value, multiply
