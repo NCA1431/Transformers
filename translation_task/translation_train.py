@@ -357,7 +357,7 @@ def train_translation(
     # visualize attention (inside the training run, so images log to the SAME run)
     if sample_sentences is not None:
         for sentence in sample_sentences:
-            visualize_all_attention(model, sp, sentence)
+            visualize_all_attention(model, sp, sentence, final_step=step)
 
     wandb.finish()
     return model
@@ -407,7 +407,7 @@ def _run_and_capture(model, sp, en_sentence, max_len=50):
     return gen_ids, src_ids, enc_w, dec_self_w, dec_cross_w
 
 
-def _plot_heads_grid(weights_last_layer, row_labels, col_labels, title, key):
+def _plot_heads_grid(weights_last_layer, row_labels, col_labels, title, key, final_step=None):
     """
     Plot ALL heads of ONE layer as a grid of small heatmaps, revealing that different heads learn
     different attention patterns. `weights_last_layer` has shape (heads, query_len, key_len).
@@ -443,18 +443,10 @@ def _plot_heads_grid(weights_last_layer, row_labels, col_labels, title, key):
         ax.set_yticks(range(len(row_labels)))
         ax.set_yticklabels(row_labels, fontsize=6)
 
-    # if there are more grid cells than heads (e.g. 8 heads in a 2x4=8 grid fits exactly, but a
-    # 3x4=12 grid would have 4 spare), hide the unused cells so they don't show empty boxes.
-    for h in range(heads, len(axes)):
-        axes[h].axis("off")
-
-    fig.suptitle(title)  # overall title above the grid
-    plt.tight_layout()  # auto-adjust spacing so labels/titles don't overlap
-    wandb.log({key: wandb.Image(fig)})  # log the whole figure to WandB as an image
-    plt.close(fig)  # free the figure's memory (important when making many figures)
+    # final_step
 
 
-def _plot_layers_grid(weights_list, row_labels, col_labels, title, key):
+def _plot_layers_grid(weights_list, row_labels, col_labels, title, key, final_step=None):
     """
     Plot EACH layer's head-averaged attention as a row of heatmaps, showing how attention evolves
     with depth. `weights_list` is a list (one entry per layer), each of shape
@@ -482,13 +474,14 @@ def _plot_layers_grid(weights_list, row_labels, col_labels, title, key):
         ax.set_yticks(range(len(row_labels)))
         ax.set_yticklabels(row_labels, fontsize=6)
 
-    fig.suptitle(title)
+    fig.suptitle(title, fontsize=10)
     plt.tight_layout()
-    wandb.log({key: wandb.Image(fig)})
+    fig.subplots_adjust(top=0.85)  # leaves room at the top for the title
+    wandb.log({key: wandb.Image(fig)}, step=final_step)
     plt.close(fig)
 
 
-def visualize_all_attention(model, sp, en_sentence):
+def visualize_all_attention(model, sp, en_sentence, final_step=None):
     """
     For one English sentence, produce SIX figures and log them to WandB:
       - encoder self-attention: (a) last layer all heads, (b) all layers head-averaged
@@ -515,6 +508,7 @@ def visualize_all_attention(model, sp, en_sentence):
         en_tokens,
         f'Encoder self-attention (last layer, all heads): "{en_sentence}"',
         "enc_self_heads",
+        final_step=final_step,
     )
     _plot_layers_grid(
         enc_w,
@@ -522,6 +516,7 @@ def visualize_all_attention(model, sp, en_sentence):
         en_tokens,
         f'Encoder self-attention (all layers, head-averaged): "{en_sentence}"',
         "enc_self_layers",
+        final_step=final_step,
     )
 
     # DECODER self-attention -> French attends to French (causal), BOTH axes French.
@@ -531,6 +526,7 @@ def visualize_all_attention(model, sp, en_sentence):
         fr_tokens,
         f'Decoder self-attention (last layer, all heads): "{en_sentence}"',
         "dec_self_heads",
+        final_step=final_step,
     )
     _plot_layers_grid(
         dec_self_w,
@@ -538,6 +534,7 @@ def visualize_all_attention(model, sp, en_sentence):
         fr_tokens,
         f'Decoder self-attention (all layers, head-averaged): "{en_sentence}"',
         "dec_self_layers",
+        final_step=final_step,
     )
 
     # CROSS-attention -> French attends to English: ROWS = French (the queries), COLS = English
@@ -548,6 +545,7 @@ def visualize_all_attention(model, sp, en_sentence):
         en_tokens,
         f'Cross-attention (last layer, all heads): "{en_sentence}"',
         "cross_heads",
+        final_step=final_step,
     )
     _plot_layers_grid(
         dec_cross_w,
@@ -555,6 +553,7 @@ def visualize_all_attention(model, sp, en_sentence):
         en_tokens,
         f'Cross-attention (all layers, head-averaged): "{en_sentence}"',
         "cross_layers",
+        final_step=final_step,
     )
 
 
