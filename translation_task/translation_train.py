@@ -8,6 +8,7 @@ carry over from the toy tasks and the translation data module.
 
 import random
 import time
+from datetime import datetime
 
 import matplotlib.pyplot as plt  # the plotting library (makes the heatmap figures)
 import sacrebleu  # computes BLEU, the standard translation metric
@@ -203,6 +204,7 @@ def train_translation(
     save_every=2000,  # save a checkpoint this often
     resume_from=None,  # path to a checkpoint to continue from (or None)
     checkpoint_path="/content/drive/MyDrive/Transformers/translation_checkpoint.pt",  # to save
+    sample_sentences=None,  # to visualize attention
 ):
     """
     Train the Transformer on English→French translation. Uses the bigger model plus the improved
@@ -228,6 +230,14 @@ def train_translation(
             "warmup_steps": warmup_steps,
         },
     )
+
+    # ---- per-run checkpoint path: a fresh run gets its OWN timestamped checkpoint file, so it
+    # can never overwrite a previous run's checkpoint. A resumed run keeps saving to the SAME
+    # file it resumed from (passed in via checkpoint_path).
+    if resume_from is None:
+        run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        checkpoint_path = f"/content/drive/MyDrive/Transformers/translation_checkpoint_{run_ts}.pt"
+    print(f"checkpoints will be saved to: {checkpoint_path}")
 
     torch.manual_seed(0)
     random.seed(0)
@@ -339,8 +349,16 @@ def train_translation(
     }
     if scheduler is not None:  # include the scheduler state in the final save too
         final_data["scheduler"] = scheduler.state_dict()
-    torch.save(final_data, "/content/drive/MyDrive/Transformers/translation_model.pt")
-    print("saved model to translation_model.pt")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    torch.save(final_data, f"/content/drive/MyDrive/Transformers/translation_model_{ts}.pt")
+    print(f"saved model to translation_model_{ts}.pt")
+
+    # visualize attention (inside the training run, so images log to the SAME run)
+    if sample_sentences is not None:
+        for sentence in sample_sentences:
+            visualize_all_attention(model, sp, sentence)
+
     wandb.finish()
     return model
 
