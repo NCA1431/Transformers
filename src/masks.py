@@ -22,7 +22,7 @@ def make_pad_mask(tokens: Tensor, pad_id: int = 0) -> Tensor:
     # return mask[:, None, None, :] would work too
 
 
-def make_causal_mask(seq_len: int) -> Tensor:
+def make_causal_mask(seq_len: int, device=None) -> Tensor:
     """
     Build a causal (look-ahead) mask.
     seq_len: length of the (target) sequence.
@@ -30,7 +30,10 @@ def make_causal_mask(seq_len: int) -> Tensor:
     """
     # torch.ones(seq_len, seq_len, bool) -> all-True grid; tril keeps the lower triangle
     # (on/below diagonal) -> mask[i,j]=True iff j<=i: position i attends to itself + earlier only.
-    causal = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))  # (seq_len, seq_len)
+    causal = torch.tril(
+        torch.ones(seq_len, seq_len, dtype=torch.bool, device=device)
+    )  # (seq_len, seq_len)
+    # (seq_len, seq_len)
     # Insert two LEADING size-1 dims so it broadcasts across batch and heads:
     #   (seq_len, seq_len) --unsqueeze(0)--> (1, seq_len, seq_len) --unsqueeze(0)--> (1,1,seq,seq)
     return causal.unsqueeze(0).unsqueeze(0)  # (1, 1, seq_len, seq_len)
@@ -44,7 +47,8 @@ def make_target_mask(tgt: Tensor, pad_id: int = 0) -> Tensor:
     """
     seq_tgt = tgt.size(1)  # tgt.shape[1] would work too
     pad = make_pad_mask(tgt, pad_id)  # (batch, 1, 1, seq_tgt) —> blocks target PAD keys
-    causal = make_causal_mask(seq_tgt)  # (1, 1, seq_tgt, seq_tgt) —> blocks FUTURE keys
+    causal = make_causal_mask(seq_tgt, device=tgt.device)  # <-- pass tgt's device
+    # (1, 1, seq_tgt, seq_tgt) —> blocks FUTURE keys
     # Combine with logical AND: a target position may attend to key j only if it's BOTH not-pad
     # AND causally allowed. Broadcasting aligns the shapes:
     #   pad:    (batch, 1, 1,       seq_tgt)
