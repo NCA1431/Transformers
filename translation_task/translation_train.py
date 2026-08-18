@@ -448,7 +448,15 @@ def _plot_heads_grid(weights_last_layer, row_labels, col_labels, title, key, fin
         ax.set_yticks(range(len(row_labels)))
         ax.set_yticklabels(row_labels, fontsize=6)
 
-    # final_step
+    # hide any unused subplot cells (e.g. if heads don't fill the grid exactly)
+    for h in range(heads, len(axes)):
+        axes[h].axis("off")
+
+    fig.suptitle(title, fontsize=10)
+    plt.tight_layout()
+    fig.subplots_adjust(top=0.85)  # leaves room at the top for the title
+    wandb.log({key: wandb.Image(fig)}, step=final_step)
+    plt.close(fig)
 
 
 def _plot_layers_grid(weights_list, row_labels, col_labels, title, key, final_step=None):
