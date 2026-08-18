@@ -356,8 +356,8 @@ def train_translation(
 
     # visualize attention (inside the training run, so images log to the SAME run)
     if sample_sentences is not None:
-        for sentence in sample_sentences:
-            visualize_all_attention(model, sp, sentence, final_step=step)
+        for i, sentence in enumerate(sample_sentences):
+            visualize_all_attention(model, sp, sentence, final_step=step, idx=i)
 
     wandb.finish()
     return model
@@ -365,45 +365,41 @@ def train_translation(
 
 def _run_and_capture(model, sp, en_sentence, max_len=50):
     """
-    Translate one English sentence and return the generated French token IDs PLUS all three
-    attention-weight lists (encoder-self, decoder-self, cross) captured from the model's forward
-    pass. We need a single sentence (not a batch) so the attention maps are clean and labelled.
+    Translate one English sentence, then do ONE final forward pass over the completed sequence
+    to capture attention that EXACTLY matches the tokens we will label. Returns the generated
+    French token IDs plus all three attention lists (encoder-self, decoder-self, cross).
     """
-    model.eval()  # eval mode: dropout off, deterministic
-
-    # encode the English sentence to token IDs and append EOS; wrap in a batch of ONE.
-    #   torch.tensor([src_ids]) -> shape (1, seq): the outer [ ] makes it a 1-row batch.
+    model.eval()
     src_ids = sp.encode(en_sentence) + [EOS]
     src_batch = torch.tensor([src_ids]).to(device)
 
-    # start the output with a single START token, shape (1, 1).
+    # --- greedy generation (just to get the token IDs; attention captured separately below) ---
     generated = torch.full((1, 1), START, dtype=torch.long, device=device)
-
-    # placeholders for the three attention lists; they get overwritten each step with the latest
-    # (the final iteration's weights cover all generated tokens, which is what we plot).
-    enc_w = dec_self_w = dec_cross_w = None
-
-    with torch.no_grad():  # generation only, no gradients
+    with torch.no_grad():
         for _ in range(max_len):
             src_mask, tgt_mask, cross_mask = make_masks(src_batch, generated, pad_id=PAD)
-            # the model returns logits AND the three attention lists (your forward's return).
-            # we unpack all four returned values by name.
-            logits, enc_w, dec_self_w, dec_cross_w = model(
-                src_batch, generated, src_mask, tgt_mask, cross_mask
-            )
-            # greedy next token: highest-scoring vocab entry at the last position.
+            logits, *_ = model(src_batch, generated, src_mask, tgt_mask, cross_mask)
             next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            generated = torch.cat([generated, next_token], dim=1)  # append it
-            # .item() pulls the single integer out of a 1-element tensor; stop at EOS.
+            generated = torch.cat([generated, next_token], dim=1)
             if next_token.item() == EOS:
                 break
 
-    # turn the generated tensor into a plain list, drop the leading START ([1:] = from index 1 on).
+    # trim the generated sequence to the tokens we will actually show (drop START, cut at EOS)
     gen_ids = generated[0].tolist()[1:]
-    # if an EOS was produced, cut the list at the first EOS (keep only real content before it).
     if EOS in gen_ids:
         gen_ids = gen_ids[: gen_ids.index(EOS)]
-    # return everything the plotting functions need.
+
+    # --- FINAL forward pass over the decoder input that corresponds EXACTLY to gen_ids ---
+    # decoder input = START + gen_ids (what the decoder saw to produce those tokens). Running the
+    # model once on this fixed sequence gives attention matrices whose size matches our labels,
+    # so the decoder maps are never blank/misaligned.
+    dec_input = torch.tensor([[START] + gen_ids]).to(device)
+    with torch.no_grad():
+        src_mask, tgt_mask, cross_mask = make_masks(src_batch, dec_input, pad_id=PAD)
+        _, enc_w, dec_self_w, dec_cross_w = model(
+            src_batch, dec_input, src_mask, tgt_mask, cross_mask
+        )
+
     return gen_ids, src_ids, enc_w, dec_self_w, dec_cross_w
 
 
@@ -431,6 +427,15 @@ def _plot_heads_grid(weights_last_layer, row_labels, col_labels, title, key, fin
         attn = weights_last_layer[h].cpu().numpy()
         # trim to the number of REAL tokens (drop any padding rows/cols).
         attn = attn[: len(row_labels), : len(col_labels)]
+
+        # SAFETY GUARD: skip if this map would be empty.
+        if attn.size == 0 or len(row_labels) == 0 or len(col_labels) == 0:
+            print(
+                f"  [viz] '{key}' head {h}: empty attention "
+                f"(rows={len(row_labels)}, cols={len(col_labels)}) — skipping this panel"
+            )
+            axes[h].axis("off")
+            continue
 
         ax = axes[h]  # the subplot cell for this head
         # imshow draws the matrix as a heatmap; aspect="auto" fills the cell;
@@ -466,6 +471,15 @@ def _plot_layers_grid(weights_list, row_labels, col_labels, title, key, final_st
         attn = weights_list[layer][0].mean(dim=0).cpu().numpy()
         attn = attn[: len(row_labels), : len(col_labels)]  # trim to real tokens
 
+        # SAFETY GUARD: skip if this map would be empty (no tokens to show).
+        if attn.size == 0 or len(row_labels) == 0 or len(col_labels) == 0:
+            print(
+                f"  [viz] '{key}' layer {layer}: empty attention "
+                f"(rows={len(row_labels)}, cols={len(col_labels)}) — skipping this panel"
+            )
+            axes[layer].axis("off")
+            continue
+
         ax = axes[layer]
         ax.imshow(attn, aspect="auto", cmap="viridis")
         ax.set_title(f"layer {layer}", fontsize=9)
@@ -481,7 +495,7 @@ def _plot_layers_grid(weights_list, row_labels, col_labels, title, key, final_st
     plt.close(fig)
 
 
-def visualize_all_attention(model, sp, en_sentence, final_step=None):
+def visualize_all_attention(model, sp, en_sentence, final_step=None, idx=0):
     """
     For one English sentence, produce SIX figures and log them to WandB:
       - encoder self-attention: (a) last layer all heads, (b) all layers head-averaged
@@ -507,7 +521,7 @@ def visualize_all_attention(model, sp, en_sentence, final_step=None):
         en_tokens,
         en_tokens,
         f'Encoder self-attention (last layer, all heads): "{en_sentence}"',
-        "enc_self_heads",
+        f"enc_self_heads_{idx}",
         final_step=final_step,
     )
     _plot_layers_grid(
@@ -515,7 +529,7 @@ def visualize_all_attention(model, sp, en_sentence, final_step=None):
         en_tokens,
         en_tokens,
         f'Encoder self-attention (all layers, head-averaged): "{en_sentence}"',
-        "enc_self_layers",
+        f"enc_self_layers_{idx}",
         final_step=final_step,
     )
 
@@ -525,7 +539,7 @@ def visualize_all_attention(model, sp, en_sentence, final_step=None):
         fr_tokens,
         fr_tokens,
         f'Decoder self-attention (last layer, all heads): "{en_sentence}"',
-        "dec_self_heads",
+        f"dec_self_heads_{idx}",
         final_step=final_step,
     )
     _plot_layers_grid(
@@ -533,7 +547,7 @@ def visualize_all_attention(model, sp, en_sentence, final_step=None):
         fr_tokens,
         fr_tokens,
         f'Decoder self-attention (all layers, head-averaged): "{en_sentence}"',
-        "dec_self_layers",
+        f"dec_self_layers_{idx}",
         final_step=final_step,
     )
 
@@ -544,7 +558,7 @@ def visualize_all_attention(model, sp, en_sentence, final_step=None):
         fr_tokens,
         en_tokens,
         f'Cross-attention (last layer, all heads): "{en_sentence}"',
-        "cross_heads",
+        f"cross_heads_{idx}",
         final_step=final_step,
     )
     _plot_layers_grid(
@@ -552,7 +566,7 @@ def visualize_all_attention(model, sp, en_sentence, final_step=None):
         fr_tokens,
         en_tokens,
         f'Cross-attention (all layers, head-averaged): "{en_sentence}"',
-        "cross_layers",
+        f"cross_layers_{idx}",
         final_step=final_step,
     )
 
